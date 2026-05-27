@@ -1,11 +1,9 @@
 import { NextResponse } from 'next/server';
 import { redis } from '@/lib/redis';
+import { apiClient } from '@/lib/api/apiFootballClient';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY;
-const API_FOOTBALL_HOST = 'v3.football.api-sports.io';
 
 export async function GET() {
   const startTime = Date.now();
@@ -17,22 +15,7 @@ export async function GET() {
     
     const today = new Date().toISOString().split('T')[0];
     
-    const fixturesResponse = await fetch(
-      `https://${API_FOOTBALL_HOST}/fixtures?date=${today}&timezone=GMT`,
-      {
-        headers: {
-          'x-rapidapi-key': API_FOOTBALL_KEY,
-          'x-rapidapi-host': API_FOOTBALL_HOST
-        },
-        next: { revalidate: 0 }
-      }
-    );
-    
-    if (!fixturesResponse.ok) {
-      throw new Error(`API-Football responded with status: ${fixturesResponse.status}`);
-    }
-    
-    const fixturesData = await fixturesResponse.json();
+    const fixturesData = await apiClient.getCached('fixtures', { date: today, timezone: 'GMT' }, { ttl: 3600 });
     const allFixtures = fixturesData.response || [];
     
     if (allFixtures.length === 0) {
@@ -61,23 +44,7 @@ export async function GET() {
       const fixture = selectedFixtures[i];
       
       try {
-        const predictionsResponse = await fetch(
-          `https://${API_FOOTBALL_HOST}/predictions?fixture=${fixture.fixture.id}`,
-          {
-            headers: {
-              'x-rapidapi-key': API_FOOTBALL_KEY,
-              'x-rapidapi-host': API_FOOTBALL_HOST
-            },
-            next: { revalidate: 0 }
-          }
-        );
-        
-        if (!predictionsResponse.ok) {
-          errorCount++;
-          continue;
-        }
-        
-        const predictionsApiData = await predictionsResponse.json();
+        const predictionsApiData = await apiClient.getCached('predictions', { fixture: fixture.fixture.id }, { ttl: 7200 });
         const predictions = predictionsApiData.response || [];
         
         predictionsData.push({
@@ -106,10 +73,6 @@ export async function GET() {
         });
         
         successCount++;
-        
-        if (i < selectedFixtures.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 600));
-        }
         
       } catch (error) {
         errorCount++;

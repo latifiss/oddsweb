@@ -24,9 +24,9 @@ interface PopularMatch {
 
 async function shouldRun(): Promise<boolean> {
   const lastRun = await redis.get('last_prefetch_run');
-  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
   
-  if (lastRun && parseInt(lastRun as string, 10) > oneHourAgo) {
+  if (lastRun && parseInt(lastRun as string, 10) > sixHoursAgo) {
     return false;
   }
   
@@ -45,7 +45,7 @@ async function getPopularMatches(): Promise<PopularMatch[]> {
       .filter((match: Match) => 
         popularLeagueIds.includes(match.league.id) && match.fixture.status.short === 'NS'
       )
-      .slice(0, 15)
+      .slice(0, 10)
       .map((match: Match) => ({ fixture: { id: match.fixture.id } }));
   } catch (error) {
     console.error('Failed to fetch popular matches:', error);
@@ -70,8 +70,8 @@ export async function GET(request: Request) {
     
     const results = await Promise.allSettled(
       matches.map(async (match: PopularMatch) => {
-        await apiClient.getCached('predictions', { fixture: match.fixture.id }, { ttl: 3600 });
-        await apiClient.getCached('odds', { fixture: match.fixture.id }, { ttl: 300 });
+        await apiClient.getCached('predictions', { fixture: match.fixture.id }, { ttl: 7200 });
+        await apiClient.getCached('odds', { fixture: match.fixture.id }, { ttl: 1800 });
         return match.fixture.id;
       })
     );

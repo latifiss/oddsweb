@@ -9,15 +9,11 @@ export function initWebSocketServer(server: any) {
   });
 
   io.on('connection', (socket) => {
-    console.log('Client connected:', socket.id);
-
     socket.on('subscribe-live', () => {
       startLiveUpdates(socket);
     });
 
-    socket.on('disconnect', () => {
-      console.log('Client disconnected:', socket.id);
-    });
+    socket.on('disconnect', () => {});
   });
 }
 
@@ -25,5 +21,5 @@ async function startLiveUpdates(socket: any) {
   setInterval(async () => {
     const liveData = await fetchLiveMatches();
     socket.emit('live-update', liveData);
-  }, 30000); 
+  }, 30000);
 }

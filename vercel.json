@@ -2,7 +2,7 @@
     "crons": [
       {
         "path": "/api/predictions/update",
-        "schedule": "45 11 * * *"
+        "schedule": "45 11 */2 * *"
       }
     ],
     "functions": {
