@@ -1,138 +1,160 @@
-import { NextResponse } from 'next/server';
-import { redis } from '@/lib/redis';
-import { apiClient } from '@/lib/api/apiFootballClient';
+import { NextResponse } from "next/server";
+import { redis } from "@/lib/redis";
+import { apiClient } from "@/lib/api/apiFootballClient";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const maxDuration = 300;
 
-export async function GET() {
-  const startTime = Date.now();
-  
-  try {
-    if (!API_FOOTBALL_KEY) {
-      throw new Error('API_FOOTBALL_KEY is not configured');
-    }
-    
-    const today = new Date().toISOString().split('T')[0];
-    
-    const fixturesData = await apiClient.getCached('fixtures', { date: today, timezone: 'GMT' }, { ttl: 3600 });
-    const allFixtures = fixturesData.response || [];
-    
-    if (allFixtures.length === 0) {
-      return NextResponse.json({
-        success: true,
-        message: 'No fixtures found for today',
-        timestamp: new Date().toISOString(),
-        fixturesProcessed: 0,
-        totalFixturesAvailable: 0
-      });
-    }
-    
-    const NUMBER_TO_PROCESS = 10;
-    const shuffled = [...allFixtures];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    const selectedFixtures = shuffled.slice(0, Math.min(NUMBER_TO_PROCESS, allFixtures.length));
-    
-    const predictionsData = [];
-    let successCount = 0;
-    let errorCount = 0;
-    
-    for (let i = 0; i < selectedFixtures.length; i++) {
-      const fixture = selectedFixtures[i];
-      
-      try {
-        const predictionsApiData = await apiClient.getCached('predictions', { fixture: fixture.fixture.id }, { ttl: 7200 });
-        const predictions = predictionsApiData.response || [];
-        
-        predictionsData.push({
-          fixtureId: fixture.fixture.id,
-          fixture: {
-            id: fixture.fixture.id,
-            homeTeam: fixture.teams.home.name,
-            awayTeam: fixture.teams.away.name,
-            homeLogo: fixture.teams.home.logo,
-            awayLogo: fixture.teams.away.logo,
-            date: fixture.fixture.date,
-            venue: fixture.fixture.venue?.name || 'Unknown',
-            status: fixture.fixture.status.short,
-            elapsed: fixture.fixture.status.elapsed || null
-          },
-          league: {
-            id: fixture.league.id,
-            name: fixture.league.name,
-            country: fixture.league.country,
-            logo: fixture.league.logo,
-            season: fixture.league.season
-          },
-          predictions: predictions,
-          hasPredictions: predictions && predictions.length > 0,
-          lastUpdated: new Date().toISOString()
-        });
-        
-        successCount++;
-        
-      } catch (error) {
-        errorCount++;
-        continue;
-      }
-    }
-    
-    await redis.set('predictions_feed', JSON.stringify(predictionsData), { ex: 86400 });
-    await redis.set('predictions_last_update', new Date().toISOString());
-    await redis.set('predictions_fixture_count', predictionsData.length);
-    await redis.set('predictions_total_available', allFixtures.length);
-    await redis.set('predictions_selected_ids', JSON.stringify(selectedFixtures.map(f => f.fixture.id)));
-    await redis.set('predictions_success_count', successCount);
-    await redis.set('predictions_error_count', errorCount);
-    
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    
-    const result = {
-      success: true,
-      message: `Successfully fetched predictions for ${successCount} random fixtures`,
-      timestamp: new Date().toISOString(),
-      fixturesProcessed: predictionsData.length,
-      totalFixturesAvailable: allFixtures.length,
-      successCount: successCount,
-      errorCount: errorCount,
-      durationSeconds: parseFloat(duration),
-      nextUpdateIn: '24 hours',
-      selectedFixtureIds: selectedFixtures.map(f => f.fixture.id)
-    };
-    
-    return NextResponse.json(result, {
-      headers: {
-        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'CDN-Cache-Control': 'no-cache'
-      },
-    });
-    
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    
-    return NextResponse.json(
-      { 
-        success: false,
-        error: 'Update failed', 
-        details: errorMessage,
-        timestamp: new Date().toISOString(),
-        fixturesProcessed: 0
-      },
-      { 
-        status: 500,
-        headers: {
-          'Cache-Control': 'no-store, no-cache, must-revalidate',
-        }
-      }
-    );
-  }
+function isAuthorized(request: Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  return Boolean(secret && request.headers.get("authorization") === `Bearer ${secret}`);
 }
 
-export async function POST() {
-  return GET();
+export async function GET(request: Request) {
+  if (!process.env.CRON_SECRET) {
+    return NextResponse.json(
+      { success: false, error: "Cron authentication is not configured." },
+      { status: 503 },
+    );
+  }
+
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!process.env.API_FOOTBALL_KEY) {
+    return NextResponse.json(
+      { success: false, error: "API_FOOTBALL_KEY is not configured." },
+      { status: 503 },
+    );
+  }
+
+  const startedAt = Date.now();
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const fixturesData = await apiClient.getCached<any[]>(
+      "fixtures",
+      { date: today, timezone: "GMT" },
+      { ttl: 3_600 },
+    );
+    const fixtures = fixturesData.response ?? [];
+
+    if (fixtures.length === 0) {
+      const timestamp = new Date().toISOString();
+      await Promise.all([
+        redis.set("predictions_feed", JSON.stringify([]), { ex: 86_400 }),
+        redis.set("predictions_last_update", timestamp, { ex: 86_400 }),
+        redis.set("predictions_fixture_count", 0, { ex: 86_400 }),
+        redis.set("predictions_total_available", 0, { ex: 86_400 }),
+        redis.set("predictions_selected_ids", JSON.stringify([]), { ex: 86_400 }),
+        redis.set("predictions_success_count", 0, { ex: 86_400 }),
+        redis.set("predictions_error_count", 0, { ex: 86_400 }),
+      ]);
+
+      return NextResponse.json({
+        success: true,
+        message: "No fixtures found for today.",
+        timestamp,
+        fixturesProcessed: 0,
+        totalFixturesAvailable: 0,
+        durationMs: Date.now() - startedAt,
+      }, { headers: { "Cache-Control": "no-store" } });
+    }
+
+    const selectedFixtures = fixtures.slice(0, 10);
+    const predictionsData: Array<Record<string, unknown>> = [];
+    let errorCount = 0;
+
+    for (const fixture of selectedFixtures) {
+      try {
+        const fixtureId = fixture.fixture?.id;
+        if (!Number.isInteger(fixtureId)) {
+          errorCount += 1;
+          continue;
+        }
+
+        const predictionData = await apiClient.getCached<any[]>(
+          "predictions",
+          { fixture: fixtureId },
+          { ttl: 7_200 },
+        );
+        const predictions = predictionData.response ?? [];
+
+        predictionsData.push({
+          fixtureId,
+          fixture: {
+            id: fixtureId,
+            homeTeam: fixture.teams?.home?.name ?? "Unknown",
+            awayTeam: fixture.teams?.away?.name ?? "Unknown",
+            homeLogo: fixture.teams?.home?.logo ?? null,
+            awayLogo: fixture.teams?.away?.logo ?? null,
+            date: fixture.fixture?.date ?? null,
+            venue: fixture.fixture?.venue?.name ?? "Unknown",
+            status: fixture.fixture?.status?.short ?? "NS",
+            elapsed: fixture.fixture?.status?.elapsed ?? null,
+          },
+          league: {
+            id: fixture.league?.id ?? null,
+            name: fixture.league?.name ?? "Unknown",
+            country: fixture.league?.country ?? null,
+            logo: fixture.league?.logo ?? null,
+            season: fixture.league?.season ?? null,
+          },
+          predictions,
+          hasPredictions: predictions.length > 0,
+          lastUpdated: new Date().toISOString(),
+        });
+      } catch (error) {
+        errorCount += 1;
+        console.error("Prediction fetch failed for a fixture.", error);
+      }
+    }
+
+    // Do not replace a previously good feed with an empty result after provider failures.
+    if (predictionsData.length === 0 && selectedFixtures.length > 0) {
+      return NextResponse.json({
+        success: false,
+        error: "No fixture predictions could be fetched; the previous feed was preserved.",
+        fixturesProcessed: 0,
+        totalFixturesAvailable: fixtures.length,
+        errorCount,
+        durationMs: Date.now() - startedAt,
+      }, { status: 502, headers: { "Cache-Control": "no-store" } });
+    }
+
+    const timestamp = new Date().toISOString();
+    const selectedIds = selectedFixtures.map((fixture: any) => fixture.fixture.id);
+
+    await Promise.all([
+      redis.set("predictions_feed", JSON.stringify(predictionsData), { ex: 86_400 }),
+      redis.set("predictions_last_update", timestamp, { ex: 86_400 }),
+      redis.set("predictions_fixture_count", predictionsData.length, { ex: 86_400 }),
+      redis.set("predictions_total_available", fixtures.length, { ex: 86_400 }),
+      redis.set("predictions_selected_ids", JSON.stringify(selectedIds), { ex: 86_400 }),
+      redis.set("predictions_success_count", predictionsData.length, { ex: 86_400 }),
+      redis.set("predictions_error_count", errorCount, { ex: 86_400 }),
+    ]);
+
+    return NextResponse.json({
+      success: true,
+      message: `Updated predictions for ${predictionsData.length} fixtures.`,
+      timestamp,
+      fixturesProcessed: predictionsData.length,
+      totalFixturesAvailable: fixtures.length,
+      successCount: predictionsData.length,
+      errorCount,
+      durationMs: Date.now() - startedAt,
+      selectedFixtureIds: selectedIds,
+    }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    console.error("Prediction update failed.", error);
+    return NextResponse.json({
+      success: false,
+      error: "Prediction update failed.",
+      timestamp: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+    }, { status: 500, headers: { "Cache-Control": "no-store" } });
+  }
 }

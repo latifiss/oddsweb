@@ -1,34 +1,35 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { redis } from '@/lib/cache/redisClient';
+import { NextResponse } from "next/server";
+import { redis } from "@/lib/redis";
 
-export async function POST(request: NextRequest) {
-  const authHeader = request.headers.get('authorization');
+export const dynamic = "force-dynamic";
+
+export async function POST(request: Request) {
   const secret = process.env.CRON_SECRET;
-  
-  if (secret && authHeader !== `Bearer ${secret}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!secret) {
+    return NextResponse.json({ error: "Cron authentication is not configured." }, { status: 503 });
   }
-  
+  if (request.headers.get("authorization") !== `Bearer ${secret}`) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
-    const keys = await redis.keys('prediction:*');
-    if (keys.length > 0) {
-      await redis.del(...keys);
-    }
-    
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-    const response = await fetch(`${baseUrl}/api/cron/update-predictions`, {
-      headers: { 'Authorization': `Bearer ${secret}` }
-    });
-    
-    const data = await response.json();
-    
-    return NextResponse.json({ 
-      message: 'Cache refreshed successfully',
-      cleared: keys.length,
-      ...data 
-    });
+    await redis.del(
+      "predictions_feed",
+      "predictions_last_update",
+      "predictions_fixture_count",
+      "predictions_total_available",
+      "predictions_selected_ids",
+      "predictions_success_count",
+      "predictions_error_count",
+    );
+
+    return NextResponse.json({
+      success: true,
+      message: "Prediction feed cache invalidated. Trigger the protected update endpoint to rebuild it.",
+      invalidatedAt: new Date().toISOString(),
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    console.error('Refresh failed:', error);
-    return NextResponse.json({ error: 'Failed to refresh cache' }, { status: 500 });
+    console.error("Prediction cache refresh failed.", error);
+    return NextResponse.json({ error: "Failed to invalidate prediction cache." }, { status: 500 });
   }
 }
