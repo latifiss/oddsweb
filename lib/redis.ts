@@ -1,27 +1,16 @@
-import { Redis } from '@upstash/redis';
+import { redis } from "@/lib/cache/redisClient";
 
-const getRedisClient = () => {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  
-  if (!url || !token) {
-    return {
-      get: async () => null,
-      set: async () => null,
-      incr: async () => 0,
-      expire: async () => null,
-    } as unknown as Redis;
+export { redis };
+
+export async function checkRateLimit(
+  key: string,
+  limit: number,
+  windowSeconds: number,
+): Promise<boolean> {
+  if (!Number.isInteger(limit) || limit < 1 || !Number.isInteger(windowSeconds) || windowSeconds < 1) {
+    throw new Error("Rate limit and window must be positive integers.");
   }
-  
-  return new Redis({
-    url,
-    token,
-  });
-};
 
-export const redis = getRedisClient();
-
-export async function checkRateLimit(key: string, limit: number, windowSeconds: number) {
   try {
     const current = await redis.incr(key);
     if (current === 1) {
@@ -29,7 +18,8 @@ export async function checkRateLimit(key: string, limit: number, windowSeconds: 
     }
     return current <= limit;
   } catch (error) {
-    console.error('Rate limit check failed:', error);
-    return true; 
+    // Fail closed: an unavailable limiter must not silently disable protection.
+    console.error("Rate limit check failed:", error);
+    return false;
   }
 }
